@@ -175,22 +175,6 @@
                        <span id="timerDisplay" class="text-lg sm:text-xl font-bold text-slate-800 tabular-nums leading-none">00:00</span>
                    </div>
                </div>
-
-
-               <!-- 録音モード -->
-               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
-                   <span class="text-[11px] font-bold text-slate-400 flex items-center gap-1.5">
-                       録音モード
-                       <span id="recIndicator" class="hidden items-center gap-1 text-red-600">
-                           <span class="w-2 h-2 rounded-full bg-red-600 dot-recording"></span>REC
-                       </span>
-                   </span>
-                   <select id="audioMode" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
-                       <option value="both" selected>文字起こし＋録音</option>
-                       <option value="transcribe">文字起こしのみ</option>
-                       <option value="record">録音のみ</option>
-                   </select>
-               </label>
            </div>
 
 
@@ -257,16 +241,6 @@
                class="w-full p-4 sm:p-5 bg-white border-2 border-slate-200 focus:border-blue-500 rounded-2xl text-base sm:text-lg text-slate-800 shadow-inner"
                data-placeholder="「音声入力を開始」を押して話すと、ここにリアルタイムで文字が打ち込まれます。&#10;&#10;話している途中の言葉は薄いグレーで表示され、言葉が切れると黒文字になって自動で改行されます。"
            ></div>
-       </section>
-
-
-       <!-- 録音した音声の一覧 -->
-       <section id="recordingsSection" class="hidden flex-col gap-2 bg-slate-50 border border-slate-200/90 rounded-2xl p-4">
-           <div class="flex items-center justify-between">
-               <span class="text-xs sm:text-sm font-bold text-slate-600">録音した音声</span>
-               <span class="text-[11px] text-slate-400">※ ページを閉じると消えます。必要なものは保存してください</span>
-           </div>
-           <ul id="recordingsList" class="flex flex-col gap-2"></ul>
        </section>
 
 
@@ -409,12 +383,6 @@
            const toastMessage = document.getElementById('toastMessage');
 
 
-           const audioModeSelect = document.getElementById('audioMode');
-           const recIndicator = document.getElementById('recIndicator');
-           const recordingsSection = document.getElementById('recordingsSection');
-           const recordingsList = document.getElementById('recordingsList');
-
-
            // 状態管理変数
            let recognition = null;
            let isRecording = false;
@@ -456,10 +424,7 @@
                get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
                set(key, val) { try { localStorage.setItem(key, val); } catch (e) {} },
            };
-           if (storage.get('memo_audioMode') === null && storage.get('memo_recordAudio') === '0') {
-               storage.set('memo_audioMode', 'transcribe');
-           }
-           [breakRuleSelect, pauseSelect, blankLineSelect, lineHeightSelect, audioModeSelect].forEach((sel) => {
+           [breakRuleSelect, pauseSelect, blankLineSelect, lineHeightSelect].forEach((sel) => {
                const saved = storage.get('memo_' + sel.id);
                if (saved !== null && [...sel.options].some(o => o.value === saved)) sel.value = saved;
                sel.addEventListener('change', () => storage.set('memo_' + sel.id, sel.value));
@@ -793,195 +758,6 @@
 
 
            /**
-            * 音声録音（MediaRecorder）
-            * 音声入力の開始〜停止を1つの録音として保存し、一覧から再生・保存できるようにする
-            */
-           let mediaRecorder = null;
-           let mediaStream = null;
-           let recordingCount = 0;
-           let audioSession = 0;
-
-
-           // 文字起こしと録音のマイク取り合い検知用
-           let recognitionStartedAt = 0;
-           let gotResultSinceStart = false;
-           let quickEndCount = 0;
-
-
-           function pickAudioMimeType() {
-               if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
-               const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
-               return candidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
-           }
-
-
-           function extensionFor(mimeType) {
-               if (mimeType.includes('mp4')) return 'm4a';
-               if (mimeType.includes('ogg')) return 'ogg';
-               return 'webm';
-           }
-
-
-           function fileTimestamp(d) {
-               const p = (n) => String(n).padStart(2, '0');
-               return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
-           }
-
-
-           /**
-            * 録音用のマイク音声を取得（失敗時は null）
-            */
-           async function acquireMicStream() {
-               if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
-                   showAlert('お使いのブラウザは音声の録音に対応していません。');
-                   return null;
-               }
-               try {
-                   return await navigator.mediaDevices.getUserMedia({
-                       audio: { echoCancellation: true, noiseSuppression: true },
-                   });
-               } catch (e) {
-                   showAlert(e && e.name === 'NotReadableError'
-                       ? 'マイクが他のアプリで使用中のため録音できませんでした。'
-                       : '録音用のマイクを取得できませんでした。マイクの使用を許可してください。');
-                   return null;
-               }
-           }
-
-
-           function startMediaRecorder(stream) {
-               const mimeType = pickAudioMimeType();
-               let recorder;
-               try {
-                   recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-               } catch (e) {
-                   stream.getTracks().forEach(t => t.stop());
-                   showAlert('録音を開始できませんでした。');
-                   return false;
-               }
-
-
-               const chunks = [];
-               const startedAt = new Date();
-               recorder.ondataavailable = (e) => {
-                   if (e.data && e.data.size > 0) chunks.push(e.data);
-               };
-               recorder.onstop = () => {
-                   stream.getTracks().forEach(t => t.stop());
-                   const type = recorder.mimeType || mimeType || 'audio/webm';
-                   if (chunks.length) {
-                       addRecording(new Blob(chunks, { type }), startedAt, Date.now() - startedAt.getTime());
-                   }
-               };
-
-
-               mediaStream = stream;
-               mediaRecorder = recorder;
-               recorder.start(1000);
-               recIndicator.classList.remove('hidden');
-               recIndicator.classList.add('inline-flex');
-               return true;
-           }
-
-
-           function stopAudioRecording() {
-               audioSession++;
-               recIndicator.classList.add('hidden');
-               recIndicator.classList.remove('inline-flex');
-               if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-                   try {
-                       mediaRecorder.stop();
-                   } catch (e) {
-                       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-                   }
-               }
-               mediaRecorder = null;
-               mediaStream = null;
-           }
-
-
-           function updateRecordingsVisibility() {
-               const has = recordingsList.children.length > 0;
-               recordingsSection.classList.toggle('hidden', !has);
-               recordingsSection.classList.toggle('flex', has);
-           }
-
-
-           function addRecording(blob, startedAt, durationMs) {
-               recordingCount += 1;
-               const url = URL.createObjectURL(blob);
-               const filename = `音声メモ録音_${fileTimestamp(startedAt)}.${extensionFor(blob.type)}`;
-               const label = `録音 ${recordingCount}`;
-               const timeLabel = `${String(startedAt.getHours()).padStart(2, '0')}:${String(startedAt.getMinutes()).padStart(2, '0')} 開始・${formatTime(Math.max(1, Math.round(durationMs / 1000)))}`;
-
-
-               const li = document.createElement('li');
-               li.className = 'flex flex-col sm:flex-row sm:items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2.5';
-
-
-               const info = document.createElement('div');
-               info.className = 'flex flex-col min-w-[120px]';
-               const title = document.createElement('span');
-               title.className = 'text-xs sm:text-sm font-bold text-slate-700';
-               title.textContent = label;
-               const meta = document.createElement('span');
-               meta.className = 'text-[11px] text-slate-400 tabular-nums';
-               meta.textContent = timeLabel;
-               info.append(title, meta);
-
-
-               const audio = document.createElement('audio');
-               audio.controls = true;
-               audio.preload = 'metadata';
-               audio.src = url;
-               audio.className = 'w-full sm:flex-1 h-10';
-
-
-               const actions = document.createElement('div');
-               actions.className = 'flex gap-2';
-               const saveBtn = document.createElement('button');
-               saveBtn.type = 'button';
-               saveBtn.className = 'px-3 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg transition-colors active:scale-95';
-               saveBtn.textContent = '保存';
-               saveBtn.addEventListener('click', () => {
-                   const a = document.createElement('a');
-                   a.href = url;
-                   a.download = filename;
-                   document.body.appendChild(a);
-                   a.click();
-                   document.body.removeChild(a);
-                   showToast(`「${filename}」を保存しました`);
-               });
-               const delBtn = document.createElement('button');
-               delBtn.type = 'button';
-               delBtn.className = 'px-3 py-2 text-xs font-bold text-red-600 bg-white hover:bg-red-50 border border-red-200 rounded-lg transition-colors active:scale-95';
-               delBtn.textContent = '削除';
-               delBtn.addEventListener('click', () => {
-                   audio.pause();
-                   URL.revokeObjectURL(url);
-                   li.remove();
-                   updateRecordingsVisibility();
-                   showToast(`${label}を削除しました`);
-               });
-               actions.append(saveBtn, delBtn);
-
-
-               li.append(info, audio, actions);
-               recordingsList.appendChild(li);
-               updateRecordingsVisibility();
-           }
-
-
-           // 録音が残っている状態でページを閉じようとしたら確認
-           window.addEventListener('beforeunload', (e) => {
-               if (recordingsList.children.length > 0 || mediaRecorder) {
-                   e.preventDefault();
-                   e.returnValue = '';
-               }
-           });
-
-
-           /**
             * 候補の中から最も信頼度の高い文字列を選ぶ
             */
            function bestTranscript(result) {
@@ -1005,13 +781,16 @@
 
 
                rec.onstart = () => {
-                   setActiveStatus(mediaRecorder ? '聞き取り＋録音中...' : '聞き取り中...');
+                   statusBadge.classList.remove('bg-slate-100', 'text-slate-600');
+                   statusBadge.classList.add('bg-red-100', 'text-red-600');
+                   statusDot.classList.remove('bg-slate-400');
+                   statusDot.classList.add('bg-red-600', 'dot-recording');
+                   statusText.textContent = '聞き取り中...';
+                   hideAlert();
                };
 
 
                rec.onresult = (event) => {
-                   gotResultSinceStart = true;
-                   quickEndCount = 0;
                    const interimParts = [];
 
 
@@ -1073,12 +852,6 @@
                    }
 
 
-                   // 録音と同時に使えない端末：録音を止めて文字起こしを続ける
-                   if ((event.error === 'audio-capture' || event.error === 'not-allowed') && handleMicConflict()) {
-                       return;
-                   }
-
-
                    if (event.error === 'not-allowed') {
                        showAlert('マイクの使用が許可されていません。ブラウザのアドレスバー付近にあるマイクのアイコンから「許可」を選んでください。');
                        stopRecording();
@@ -1100,17 +873,16 @@
                    resetSessionState();
 
 
-                   if (isRecording && mediaRecorder && !gotResultSinceStart &&
-                       Date.now() - recognitionStartedAt < 1500) {
-                       quickEndCount += 1;
-                       if (quickEndCount >= 2) handleMicConflict();
-                   }
-
-
                    if (isRecording) {
                        statusText.textContent = '再接続中...';
                        restartTimer = setTimeout(() => {
-                           if (isRecording) startRecognition();
+                           if (isRecording) {
+                               try {
+                                   rec.start();
+                               } catch (e) {
+                                   // 既に開始済みの場合の例外を吸収
+                               }
+                           }
                        }, 80);
                    } else {
                        updateStoppedUI();
@@ -1138,102 +910,33 @@
 
 
            /**
-            * 音声認識の開始
-            * 録音中は、録音用に取得したマイク音声を認識にも渡す（対応ブラウザではマイクの取り合いが起きない）
-            */
-           function startRecognition() {
-               recognitionStartedAt = Date.now();
-               gotResultSinceStart = false;
-               const track = mediaStream && mediaStream.getAudioTracks()[0];
-               try {
-                   if (track && track.readyState === 'live') {
-                       recognition.start(track);
-                   } else {
-                       recognition.start();
-                   }
-               } catch (e) {
-                   if (e && e.name === 'InvalidStateError') return; // すでに実行中
-                   try { recognition.start(); } catch (_) {}
-               }
-           }
-
-
-           /**
-            * 文字起こしと録音を同時に使えない端末での対応
-            * 録音を止めて（ここまでの録音は一覧に残す）文字起こしを続け、次回から「文字起こしのみ」にする
-            */
-           function handleMicConflict() {
-               if (!mediaRecorder) return false;
-               stopAudioRecording();
-               audioModeSelect.value = 'transcribe';
-               storage.set('memo_audioMode', 'transcribe');
-               showAlert('この端末では文字起こしと録音を同時に使えないため、録音を止めて文字起こしを続けます（録音モードを「文字起こしのみ」に切り替えました）。録音したいときは「録音のみ」を選んでください。');
-               if (isRecording) statusText.textContent = '聞き取り中...';
-               return true;
-           }
-
-
-           function setActiveStatus(text) {
-               statusBadge.classList.remove('bg-slate-100', 'text-slate-600');
-               statusBadge.classList.add('bg-red-100', 'text-red-600');
-               statusDot.classList.remove('bg-slate-400');
-               statusDot.classList.add('bg-red-600', 'dot-recording');
-               statusText.textContent = text;
-           }
-
-
-           /**
             * 録音開始処理
             */
-           async function startRecording() {
-               const mode = audioModeSelect.value; // 'both' | 'transcribe' | 'record'
-               hideAlert();
+           function startRecording() {
+               if (!recognition) {
+                   recognition = initRecognition();
+               }
+               applyPhraseHints(recognition);
+               resetSessionState();
                isRecording = true;
-               quickEndCount = 0;
-               audioModeSelect.disabled = true;
 
 
                // ボタン表示を「停止」状態へ更新
                toggleBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
                toggleBtn.classList.add('bg-red-600', 'hover:bg-red-700', 'recording-pulse');
-               btnText.textContent = mode === 'record' ? '録音を停止' : '音声入力を停止';
+               btnText.textContent = '音声入力を停止';
                btnIcon.innerHTML = `<rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none" />`;
-               statusText.textContent = '準備中...';
 
 
                startTimer();
                requestWakeLock();
 
 
-               // 録音する場合は先にマイクを取得（認識にも同じマイク音声を渡すため）
-               if (mode !== 'transcribe') {
-                   const session = ++audioSession;
-                   const stream = await acquireMicStream();
-                   if (session !== audioSession || !isRecording) {
-                       if (stream) stream.getTracks().forEach(t => t.stop());
-                       return;
-                   }
-                   if (!stream || !startMediaRecorder(stream)) {
-                       if (mode === 'record') {
-                           stopRecording();
-                           return;
-                       }
-                   }
+               try {
+                   recognition.start();
+               } catch (e) {
+                   // すでに実行中の場合は無視
                }
-
-
-               if (mode === 'record') {
-                   setActiveStatus('録音中...');
-                   return;
-               }
-
-
-               if (!recognition) {
-                   recognition = initRecognition();
-               }
-               applyPhraseHints(recognition);
-               resetSessionState();
-               startRecognition();
            }
 
 
@@ -1250,7 +953,6 @@
 
                stopTimer();
                releaseWakeLock();
-               stopAudioRecording();
                updateStoppedUI();
 
 
@@ -1268,7 +970,6 @@
                toggleBtn.classList.remove('bg-red-600', 'hover:bg-red-700', 'recording-pulse');
                toggleBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
                btnText.textContent = '音声入力を開始';
-               audioModeSelect.disabled = false;
                btnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />`;
 
 
