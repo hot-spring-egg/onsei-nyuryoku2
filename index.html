@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+   <meta charset="UTF-8" />
+   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+   <title>リアルタイム自動改行 音声入力メモ</title>
+   <!-- Tailwind CSS の読み込み -->
+   <script src="https://cdn.tailwindcss.com"></script>
+   <!-- Google Fonts (Inter & Noto Sans JP) -->
+   <link rel="preconnect" href="https://fonts.googleapis.com">
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+   <style>
+       body {
+           font-family: 'Inter', 'Noto Sans JP', sans-serif;
+           background-color: #f4f6f9;
+           color: #1f2937;
+       }
+
+
+       /* 録音中の波紋アニメーション */
+       @keyframes pulse-ring {
+           0% {
+               transform: scale(0.97);
+               box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.65);
+           }
+           70% {
+               transform: scale(1);
+               box-shadow: 0 0 0 12px rgba(220, 38, 38, 0);
+           }
+           100% {
+               transform: scale(0.97);
+               box-shadow: 0 0 0 0 rgba(220, 38, 38, 0);
+           }
+       }
+       .recording-pulse {
+           animation: pulse-ring 1.5s infinite;
+       }
+
+
+       /* ステータスドット点滅 */
+       @keyframes dot-blink {
+           0%, 100% { opacity: 1; transform: scale(1); }
+           50% { opacity: 0.35; transform: scale(1.2); }
+       }
+       .dot-recording {
+           animation: dot-blink 1.2s infinite;
+       }
+
+
+       /* メインエディタ（contenteditable）のスタイル */
+       #editor {
+           min-height: 360px;
+           max-height: 60vh;
+           overflow-y: auto;
+           white-space: pre-wrap;
+           word-break: break-word;
+           outline: none;
+           line-height: 1.8;
+           transition: border-color 0.2s ease, box-shadow 0.2s ease;
+       }
+
+
+       #editor:empty::before {
+           content: attr(data-placeholder);
+           color: #9ca3af;
+           pointer-events: none;
+           display: block;
+       }
+
+
+       /* 話している途中のリアルタイム仮テキスト（薄いグレー＆ハイライト） */
+       .interim-text {
+           color: #9ca3af;
+           background-color: #f3f4f6;
+           border-radius: 4px;
+           padding: 1px 4px;
+       }
+
+
+       /* 等幅数字（タイマー表示用） */
+       .tabular-nums {
+           font-variant-numeric: tabular-nums;
+       }
+
+
+       /* カスタムスクロールバー */
+       #editor::-webkit-scrollbar {
+           width: 8px;
+       }
+       #editor::-webkit-scrollbar-track {
+           background: #f1f5f9;
+           border-radius: 8px;
+       }
+       #editor::-webkit-scrollbar-thumb {
+           background: #cbd5e1;
+           border-radius: 8px;
+       }
+       #editor::-webkit-scrollbar-thumb:hover {
+           background: #94a3b8;
+       }
+   </style>
+</head>
+<body class="antialiased min-h-screen flex flex-col justify-between p-3 sm:p-6">
+
+
+   <!-- メインカードコンテナ -->
+   <main class="w-full max-w-4xl mx-auto bg-white rounded-2xl shadow-sm border border-slate-200/90 p-5 sm:p-7 flex flex-col gap-5">
+
+
+       <!-- ヘッダー -->
+       <header class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-4">
+           <div class="flex items-center gap-2.5">
+               <div class="p-2 bg-blue-50 text-blue-600 rounded-xl">
+                   <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                   </svg>
+               </div>
+               <div>
+                   <h1 class="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">リアルタイム自動改行 音声入力メモ</h1>
+                   <p class="text-xs text-slate-500 hidden sm:block">声を出した瞬間に直接入力され、読点（「、」）や言葉の切れ目で自動改行します</p>
+               </div>
+           </div>
+
+
+           <!-- ステータスバッジ -->
+           <div class="flex items-center gap-2">
+               <span id="wakelockBadge" class="hidden text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-full font-semibold">
+                   画面消灯防止ON
+               </span>
+               <div id="statusBadge" class="inline-flex items-center gap-2 text-xs sm:text-sm font-bold px-3.5 py-1.5 rounded-full bg-slate-100 text-slate-600 transition-colors">
+                   <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>
+                   <span id="statusText">待機中</span>
+               </div>
+           </div>
+       </header>
+
+
+       <!-- ブラウザ非対応・エラー通知バナー -->
+       <div id="alertBanner" class="hidden bg-red-50 border-l-4 border-red-500 p-4 rounded-r-xl flex items-start justify-between gap-3">
+           <div class="flex items-start gap-2.5">
+               <svg class="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                   <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+               </svg>
+               <p id="alertMessage" class="text-xs sm:text-sm text-red-800 font-medium"></p>
+           </div>
+           <button id="closeAlertBtn" type="button" class="text-red-400 hover:text-red-600 p-1" aria-label="閉じる">
+               <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                   <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+               </svg>
+           </button>
+       </div>
+
+
+       <!-- コントロールバー（録音ボタン・経過時間・改行/間隔オプション） -->
+       <section class="bg-slate-50 border border-slate-200/90 rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+
+           <!-- 左側：録音開始/停止ボタン & 経過時間カウンター -->
+           <div class="flex flex-wrap items-center gap-3 sm:gap-4">
+               <button id="toggleBtn" type="button" class="inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm sm:text-base px-6 py-3.5 rounded-xl shadow-sm transition-all active:scale-95 min-w-[195px]">
+                   <svg id="btnIcon" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
+                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                   </svg>
+                   <span id="btnText">音声入力を開始</span>
+               </button>
+
+
+               <!-- 経過時間カウンター（ストップウォッチ） -->
+               <div id="timerBox" class="flex items-center gap-2.5 bg-white border border-slate-200 px-4 py-2 rounded-xl shadow-2xs transition-colors">
+                   <svg id="timerIcon" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-slate-400 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                       <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                   </svg>
+                   <div class="flex flex-col">
+                       <span class="text-[11px] font-bold text-slate-400 leading-none mb-1">経過時間</span>
+                       <span id="timerDisplay" class="text-lg sm:text-xl font-bold text-slate-800 tabular-nums leading-none">00:00</span>
+                   </div>
+               </div>
+           </div>
+
+
+           <!-- 右側：改行・段落・行間設定 -->
+           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+               <!-- 改行ルール -->
+               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                   <span class="text-[11px] font-bold text-slate-400">改行ルール</span>
+                   <select id="breakRule" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
+                       <option value="comma_and_pause" selected>読点「、」と切れ目</option>
+                       <option value="pause_only">言葉の切れ目のみ</option>
+                       <option value="period_and_pause">句点「。」と切れ目</option>
+                   </select>
+               </label>
+
+
+               <!-- 改行までの無音時間（早めの改行） -->
+               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                   <span class="text-[11px] font-bold text-slate-400">切れ目と判定する無音</span>
+                   <select id="pauseMs" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
+                       <option value="400">0.4秒（最速）</option>
+                       <option value="600">0.6秒（速い）</option>
+                       <option value="800" selected>0.8秒（おすすめ）</option>
+                       <option value="1200">1.2秒（ゆっくり）</option>
+                       <option value="0">ブラウザ任せ（従来）</option>
+                   </select>
+               </label>
+
+
+               <!-- 区切り間隔 -->
+               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                   <span class="text-[11px] font-bold text-slate-400">区切り間隔</span>
+                   <select id="blankLineMode" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
+                       <option value="double" selected>1行空ける（見やすい）</option>
+                       <option value="single">通常の改行（1行）</option>
+                   </select>
+               </label>
+
+
+               <!-- 行間 -->
+               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
+                   <span class="text-[11px] font-bold text-slate-400">行間</span>
+                   <select id="lineHeightSelect" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
+                       <option value="1.5">標準（1.5）</option>
+                       <option value="1.8" selected>ゆったり（1.8）</option>
+                       <option value="2.2">広め（2.2）</option>
+                   </select>
+               </label>
+           </div>
+       </section>
+
+
+       <!-- メインエディタエリア（即時リアルタイム直接入力＆直接編集対応） -->
+       <section class="flex flex-col gap-2">
+           <div class="flex items-center justify-between px-1">
+               <span class="text-xs font-bold text-slate-500">メモ本文（クリックして直接キーボード編集もできます）</span>
+               <span id="charCount" class="text-xs font-semibold text-slate-500 bg-slate-100 px-2.5 py-0.5 rounded-full">0 文字</span>
+           </div>
+
+
+           <div
+               id="editor"
+               contenteditable="true"
+               class="w-full p-4 sm:p-5 bg-white border-2 border-slate-200 focus:border-blue-500 rounded-2xl text-base sm:text-lg text-slate-800 shadow-inner"
+               data-placeholder="「音声入力を開始」を押して話すと、ここにリアルタイムで文字が打ち込まれます。&#10;&#10;話している途中の言葉は薄いグレーで表示され、言葉が切れると黒文字になって自動で改行されます。"
+           ></div>
+       </section>
+
+
+       <!-- 単語登録・誤変換の自動修正 -->
+       <details class="bg-slate-50 border border-slate-200/90 rounded-2xl p-4">
+           <summary class="text-xs sm:text-sm font-bold text-slate-600 cursor-pointer">単語登録・誤変換の自動修正（聞き取り精度の向上）</summary>
+           <div class="mt-3 flex flex-col gap-2">
+               <textarea id="dictInput" rows="4" class="w-full p-3 text-sm font-mono bg-white border border-slate-200 rounded-xl outline-none focus:border-blue-500" placeholder="誤った変換=正しい表記（1行に1つ）&#10;例) くろーど=Claude&#10;例) 会議室絵=会議室へ"></textarea>
+               <p class="text-xs text-slate-500 leading-relaxed">
+                   よく間違える言葉を登録すると、自動で正しい表記に直します。「=」の右側の単語は、対応ブラウザでは認識のヒントとしても使われます（次に録音を開始したときから反映）。
+               </p>
+           </div>
+       </details>
+
+
+       <!-- フッターアクションバー -->
+       <footer class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-1">
+           <p class="text-xs text-slate-500">
+               ※ 話している途中の文字は<span class="inline-block bg-slate-100 text-slate-400 px-1.5 py-0.5 rounded mx-1 font-medium">薄いグレー</span>で表示され、切れた瞬間に確定します。
+           </p>
+
+
+           <div class="flex flex-wrap items-center gap-2">
+               <button id="newlineBtn" type="button" class="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs sm:text-sm font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl transition-colors active:scale-95">
+                   <span>↵ 手動で改行</span>
+               </button>
+
+
+               <button id="copyBtn" type="button" class="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs sm:text-sm font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl transition-colors active:scale-95">
+                   <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                       <path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                   </svg>
+                   <span>全文コピー</span>
+               </button>
+
+
+               <button id="downloadBtn" type="button" class="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs sm:text-sm font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl transition-colors active:scale-95">
+                   <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                       <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                   </svg>
+                   <span>テキスト保存</span>
+               </button>
+
+
+               <button id="clearBtn" type="button" class="inline-flex items-center gap-1.5 px-3.5 py-2.5 text-xs sm:text-sm font-bold text-red-600 bg-white hover:bg-red-50 border border-red-200 rounded-xl transition-colors active:scale-95">
+                   <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                       <path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                   </svg>
+                   <span>クリア</span>
+               </button>
+           </div>
+       </footer>
+   </main>
+
+
+   <!-- トースト通知 -->
+   <div id="toast" class="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 transition-all duration-200 opacity-0 pointer-events-none translate-y-3">
+       <div class="bg-slate-800 text-white px-5 py-2.5 rounded-full shadow-lg flex items-center gap-2 text-xs sm:text-sm font-semibold">
+           <svg class="h-4 w-4 text-emerald-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5">
+               <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7" />
+           </svg>
+           <span id="toastMessage">コピーしました</span>
+       </div>
+   </div>
+
+
+   <!-- クリア確認用カスタムモーダル（alert/confirm不使用） -->
+   <div id="clearModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+       <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl border border-slate-100">
+           <h2 class="text-base sm:text-lg font-bold text-slate-900">文章と経過時間をリセットしますか？</h2>
+           <p class="text-xs sm:text-sm text-slate-500 mt-2 leading-relaxed">
+               エディタ内のすべての文章が消去され、経過時間カウンターも <span class="font-bold text-slate-700">00:00</span> に戻ります。
+           </p>
+           <div class="mt-6 flex justify-end gap-2.5">
+               <button id="cancelClearBtn" type="button" class="px-4 py-2.5 text-xs sm:text-sm font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors">
+                   キャンセル
+               </button>
+               <button id="confirmClearBtn" type="button" class="px-4 py-2.5 text-xs sm:text-sm font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors">
+                   リセットする
+               </button>
+           </div>
+       </div>
+   </div>
+
+
+   <script>
+       /**
+        * リアルタイム自動改行 音声入力メモ
+        * - Web Speech API (SpeechRecognition) による即時ストリーミング認識
+        * - 仮テキストのリアルタイム挿入＆読点「、」/句点「。」の即時改行反映
+        * - 独自の無音タイマーによる早めの改行（ブラウザの確定を待たない）
+        * - 後から届いた確定結果で、早めに確定した行を正しい文字に差し替え
+        * - 経過時間カウンター（ストップウォッチ）＆無音切断時の自動再接続
+        */
+       document.addEventListener('DOMContentLoaded', () => {
+           const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+
+           // UI要素の参照
+           const toggleBtn = document.getElementById('toggleBtn');
+           const btnText = document.getElementById('btnText');
+           const btnIcon = document.getElementById('btnIcon');
+           const statusBadge = document.getElementById('statusBadge');
+           const statusDot = document.getElementById('statusDot');
+           const statusText = document.getElementById('statusText');
+           const wakeLockBadge = document.getElementById('wakelockBadge');
+
+
+           const timerBox = document.getElementById('timerBox');
+           const timerIcon = document.getElementById('timerIcon');
+           const timerDisplay = document.getElementById('timerDisplay');
+
+
+           const editor = document.getElementById('editor');
+           const charCountEl = document.getElementById('charCount');
+           const breakRuleSelect = document.getElementById('breakRule');
+           const pauseSelect = document.getElementById('pauseMs');
+           const blankLineSelect = document.getElementById('blankLineMode');
+           const lineHeightSelect = document.getElementById('lineHeightSelect');
+           const dictInput = document.getElementById('dictInput');
+
+
+           const newlineBtn = document.getElementById('newlineBtn');
+           const copyBtn = document.getElementById('copyBtn');
+           const downloadBtn = document.getElementById('downloadBtn');
+           const clearBtn = document.getElementById('clearBtn');
+
+
+           const alertBanner = document.getElementById('alertBanner');
+           const alertMessage = document.getElementById('alertMessage');
+           const closeAlertBtn = document.getElementById('closeAlertBtn');
+
+
+           const clearModal = document.getElementById('clearModal');
+           const cancelClearBtn = document.getElementById('cancelClearBtn');
+           const confirmClearBtn = document.getElementById('confirmClearBtn');
+
+
+           const toast = document.getElementById('toast');
+           const toastMessage = document.getElementById('toastMessage');
+
+
+           // 状態管理変数
+           let recognition = null;
+           let isRecording = false;
+           let interimSpan = null;
+           let restartTimer = null;
+           let wakeLock = null;
+
+
+           // 早め改行（無音タイマー）用の状態
+           // consumedText[i] : 結果 i のうち、早めに確定して画面に出した部分の文字列
+           // commitsFor[i]   : 結果 i を含む早期確定ブロック（後で正しい文字に差し替えるため）
+           // lastInterim     : 直近の仮テキスト [{ i, full, part }]
+           let pauseTimer = null;
+           let consumedText = {};
+           let commitsFor = {};
+           let lastInterim = [];
+
+
+           // 経過時間カウンター変数
+           let elapsedSeconds = 0;
+           let timerInterval = null;
+           let toastTimeout = null;
+
+
+           // ブラウザ対応チェック
+           if (!SpeechRecognition) {
+               showAlert('お使いのブラウザは音声認識に対応していません。Google Chrome または Microsoft Edge の最新版をご利用ください。');
+               toggleBtn.disabled = true;
+               toggleBtn.classList.add('opacity-50', 'cursor-not-allowed');
+               statusText.textContent = '非対応ブラウザ';
+               return;
+           }
+
+
+           /**
+            * 設定の保存・復元（localStorage）
+            */
+           const storage = {
+               get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
+               set(key, val) { try { localStorage.setItem(key, val); } catch (e) {} },
+           };
+           [breakRuleSelect, pauseSelect, blankLineSelect, lineHeightSelect].forEach((sel) => {
+               const saved = storage.get('memo_' + sel.id);
+               if (saved !== null && [...sel.options].some(o => o.value === saved)) sel.value = saved;
+               sel.addEventListener('change', () => storage.set('memo_' + sel.id, sel.value));
+           });
+           editor.style.lineHeight = lineHeightSelect.value;
+           dictInput.value = storage.get('memo_dict') || '';
+
+
+           /**
+            * 単語登録（誤変換の自動修正）
+            */
+           let dictionary = [];
+           function parseDictionary() {
+               dictionary = dictInput.value.split('\n')
+                   .map(line => line.split('='))
+                   .filter(p => p.length === 2 && p[0].trim() && p[1].trim())
+                   .map(([from, to]) => [from.trim(), to.trim()]);
+           }
+           parseDictionary();
+           dictInput.addEventListener('input', () => {
+               storage.set('memo_dict', dictInput.value);
+               parseDictionary();
+           });
+
+
+           function applyDictionary(text) {
+               return dictionary.reduce((t, [from, to]) => t.split(from).join(to), text);
+           }
+
+
+           /**
+            * 画面上のエラーバナー表示
+            */
+           function showAlert(msg) {
+               alertMessage.textContent = msg;
+               alertBanner.classList.remove('hidden');
+           }
+
+
+           function hideAlert() {
+               alertBanner.classList.add('hidden');
+           }
+
+
+           closeAlertBtn.addEventListener('click', hideAlert);
+
+
+           /**
+            * トースト通知表示
+            */
+           function showToast(msg) {
+               toastMessage.textContent = msg;
+               toast.classList.remove('opacity-0', 'translate-y-3');
+               toast.classList.add('opacity-100', 'translate-y-0');
+
+
+               if (toastTimeout) clearTimeout(toastTimeout);
+               toastTimeout = setTimeout(() => {
+                   toast.classList.remove('opacity-100', 'translate-y-0');
+                   toast.classList.add('opacity-0', 'translate-y-3');
+               }, 2200);
+           }
+
+
+           /**
+            * 文字数カウント更新
+            */
+           function updateCharCount() {
+               const clone = editor.cloneNode(true);
+               const tempInterim = clone.querySelector('.interim-text');
+               if (tempInterim) tempInterim.remove();
+               const rawText = clone.textContent || '';
+               const count = rawText.replace(/\n/g, '').length;
+               charCountEl.textContent = `${count.toLocaleString()} 文字`;
+           }
+
+
+           editor.addEventListener('input', updateCharCount);
+
+
+           /**
+            * 行間スタイル変更
+            */
+           lineHeightSelect.addEventListener('change', () => {
+               editor.style.lineHeight = lineHeightSelect.value;
+           });
+
+
+           /**
+            * 経過時間フォーマット（00:00 / 60分以上は 00:00:00）
+            */
+           function formatTime(sec) {
+               const h = Math.floor(sec / 3600);
+               const m = Math.floor((sec % 3600) / 60);
+               const s = sec % 60;
+               const mm = String(m).padStart(2, '0');
+               const ss = String(s).padStart(2, '0');
+               if (h > 0) {
+                   return `${String(h).padStart(2, '0')}:${mm}:${ss}`;
+               }
+               return `${mm}:${ss}`;
+           }
+
+
+           function startTimer() {
+               if (timerInterval) return;
+               timerBox.classList.remove('bg-white', 'border-slate-200');
+               timerBox.classList.add('bg-red-50', 'border-red-200');
+               timerIcon.classList.remove('text-slate-400');
+               timerIcon.classList.add('text-red-500');
+               timerDisplay.classList.remove('text-slate-800');
+               timerDisplay.classList.add('text-red-600');
+
+
+               timerInterval = setInterval(() => {
+                   elapsedSeconds += 1;
+                   timerDisplay.textContent = formatTime(elapsedSeconds);
+               }, 1000);
+           }
+
+
+           function stopTimer() {
+               if (timerInterval) {
+                   clearInterval(timerInterval);
+                   timerInterval = null;
+               }
+               timerBox.classList.remove('bg-red-50', 'border-red-200');
+               timerBox.classList.add('bg-white', 'border-slate-200');
+               timerIcon.classList.remove('text-red-500');
+               timerIcon.classList.add('text-slate-400');
+               timerDisplay.classList.remove('text-red-600');
+               timerDisplay.classList.add('text-slate-800');
+           }
+
+
+           function resetTimer() {
+               stopTimer();
+               elapsedSeconds = 0;
+               timerDisplay.textContent = '00:00';
+           }
+
+
+           /**
+            * 画面スリープ防止（Wake Lock API）
+            */
+           async function requestWakeLock() {
+               if ('wakeLock' in navigator) {
+                   try {
+                       wakeLock = await navigator.wakeLock.request('screen');
+                       wakeLockBadge.classList.remove('hidden');
+                       wakeLock.addEventListener('release', () => {
+                           wakeLockBadge.classList.add('hidden');
+                       });
+                   } catch (e) {
+                       // 非対応または省電力モード時はスキップ
+                   }
+               }
+           }
+
+
+           function releaseWakeLock() {
+               if (wakeLock) {
+                   wakeLock.release().catch(() => {});
+                   wakeLock = null;
+               }
+               wakeLockBadge.classList.add('hidden');
+           }
+
+
+           /**
+            * 改行区切り文字列の取得（\n\n または \n）
+            */
+           function getSeparator() {
+               return blankLineSelect.value === 'double' ? '\n\n' : '\n';
+           }
+
+
+           /**
+            * 確定テキストに改行ルールを適用して整形
+            */
+           function formatRecognizedText(text) {
+               const rule = breakRuleSelect.value;
+               const sep = getSeparator();
+               let formatted = applyDictionary(text.trim());
+               if (!formatted) return '';
+
+
+               if (rule === 'comma_and_pause') {
+                   // 読点「、」・カンマおよび句点「。」の直後に改行を挿入
+                   formatted = formatted.replace(/([、，,。．.])/g, `$1${sep}`);
+               } else if (rule === 'period_and_pause') {
+                   // 句点「。」・疑問符・感嘆符の直後に改行を挿入
+                   formatted = formatted.replace(/([。．.！？!?])/g, `$1${sep}`);
+               }
+
+
+               // 連続しすぎる改行を正規化
+               if (sep === '\n\n') {
+                   formatted = formatted.replace(/\n{3,}/g, '\n\n');
+               } else {
+                   formatted = formatted.replace(/\n{2,}/g, '\n');
+               }
+
+
+               // 末尾に区切り改行を付与
+               formatted = formatted.replace(/\n+$/, '') + sep;
+               return formatted;
+           }
+
+
+           /**
+            * 認識中の仮テキスト（薄いグレー）をエディタ末尾にリアルタイム更新
+            */
+           function updateInterimText(text) {
+               const rule = breakRuleSelect.value;
+               const sep = getSeparator();
+               let displayInterim = applyDictionary(text);
+
+
+               // 話している最中でも読点「、」や句点「。」が入ったら即座に改行表示
+               if (rule === 'comma_and_pause') {
+                   displayInterim = displayInterim.replace(/([、，,。．.])/g, `$1${sep}`);
+               } else if (rule === 'period_and_pause') {
+                   displayInterim = displayInterim.replace(/([。．.！？!?])/g, `$1${sep}`);
+               }
+
+
+               if (sep === '\n\n') {
+                   displayInterim = displayInterim.replace(/\n{3,}/g, '\n\n');
+               } else {
+                   displayInterim = displayInterim.replace(/\n{2,}/g, '\n');
+               }
+
+
+               if (!interimSpan || !editor.contains(interimSpan)) {
+                   interimSpan = document.createElement('span');
+                   interimSpan.className = 'interim-text';
+                   interimSpan.setAttribute('contenteditable', 'false');
+                   editor.appendChild(interimSpan);
+               }
+
+
+               interimSpan.textContent = displayInterim;
+               editor.scrollTop = editor.scrollHeight;
+           }
+
+
+           /**
+            * 仮テキスト要素の除去
+            */
+           function removeInterimSpan() {
+               if (interimSpan && interimSpan.parentNode) {
+                   interimSpan.parentNode.removeChild(interimSpan);
+               }
+               interimSpan = null;
+           }
+
+
+           /**
+            * 確定した文章を黒文字テキストとしてエディタに追加
+            * 戻り値：追加したノード（後で差し替えできるよう span で包む）
+            */
+           function appendFinalText(text) {
+               const formatted = formatRecognizedText(text);
+               if (!formatted) return null;
+
+
+               removeInterimSpan();
+
+
+               const sep = getSeparator();
+               const currentText = editor.textContent || '';
+
+
+               // 既存テキストの末尾が改行でない場合、区切り改行を補う
+               if (currentText.length > 0 && !currentText.endsWith('\n')) {
+                   editor.appendChild(document.createTextNode(sep));
+               }
+
+
+               const span = document.createElement('span');
+               span.textContent = formatted;
+               editor.appendChild(span);
+               editor.scrollTop = editor.scrollHeight;
+               updateCharCount();
+               return span;
+           }
+
+
+           /**
+            * 早め改行：無音が一定時間続いたら、ブラウザの確定を待たずに仮テキストを確定して改行
+            */
+           function commitInterimEarly() {
+               clearTimeout(pauseTimer);
+               pauseTimer = null;
+
+
+               const parts = lastInterim.filter(p => p.part.trim());
+               if (!parts.length) return false;
+
+
+               const text = parts.map(p => p.part).join('');
+               const span = appendFinalText(text);
+               if (!span) return false;
+
+
+               const commit = { span, indices: parts.map(p => p.i), formatted: span.textContent };
+               parts.forEach(p => {
+                   consumedText[p.i] = p.full;
+                   (commitsFor[p.i] = commitsFor[p.i] || []).push(commit);
+               });
+               lastInterim = [];
+               return true;
+           }
+
+
+           function schedulePauseBreak() {
+               clearTimeout(pauseTimer);
+               const ms = Number(pauseSelect.value);
+               if (ms > 0) pauseTimer = setTimeout(commitInterimEarly, ms);
+           }
+
+
+           function resetSessionState() {
+               clearTimeout(pauseTimer);
+               pauseTimer = null;
+               consumedText = {};
+               commitsFor = {};
+               lastInterim = [];
+           }
+
+
+           /**
+            * 候補の中から最も信頼度の高い文字列を選ぶ
+            */
+           function bestTranscript(result) {
+               let best = result[0];
+               for (let k = 1; k < result.length; k++) {
+                   if ((result[k].confidence || 0) > (best.confidence || 0)) best = result[k];
+               }
+               return best.transcript;
+           }
+
+
+           /**
+            * Web Speech API の初期化
+            */
+           function initRecognition() {
+               const rec = new SpeechRecognition();
+               rec.lang = 'ja-JP';
+               rec.continuous = true;
+               rec.interimResults = true;
+               rec.maxAlternatives = 5;
+
+
+               rec.onstart = () => {
+                   statusBadge.classList.remove('bg-slate-100', 'text-slate-600');
+                   statusBadge.classList.add('bg-red-100', 'text-red-600');
+                   statusDot.classList.remove('bg-slate-400');
+                   statusDot.classList.add('bg-red-600', 'dot-recording');
+                   statusText.textContent = '聞き取り中...';
+                   hideAlert();
+               };
+
+
+               rec.onresult = (event) => {
+                   const interimParts = [];
+
+
+                   for (let i = event.resultIndex; i < event.results.length; i++) {
+                       const result = event.results[i];
+                       const transcript = bestTranscript(result);
+                       const consumed = consumedText[i] || '';
+
+
+                       if (result.isFinal) {
+                           if (!consumed) {
+                               appendFinalText(transcript);
+                           } else if (transcript.startsWith(consumed)) {
+                               // 早めに確定した部分は表示済み。続きがあれば追加
+                               appendFinalText(transcript.slice(consumed.length));
+                           } else {
+                               // 確定時に認識内容が修正された → 早めに確定した行を正しい文字に差し替え
+                               const commits = commitsFor[i] || [];
+                               const c = commits[0];
+                               if (commits.length === 1 && c.indices.length === 1 &&
+                                   c.span.isConnected && c.span.textContent === c.formatted) {
+                                   const fixed = formatRecognizedText(transcript);
+                                   if (fixed) {
+                                       c.span.textContent = fixed;
+                                       c.formatted = fixed;
+                                       updateCharCount();
+                                   }
+                               }
+                           }
+                           delete consumedText[i];
+                           delete commitsFor[i];
+                       } else {
+                           // 早めに確定済みの部分を除いた「続き」だけを仮テキストとして表示
+                           const part = transcript.startsWith(consumed)
+                               ? transcript.slice(consumed.length)
+                               : transcript.slice(Math.min(consumed.length, transcript.length));
+                           interimParts.push({ i, full: transcript, part });
+                       }
+                   }
+
+
+                   lastInterim = interimParts;
+                   const interimTranscript = interimParts.map(p => p.part).join('');
+
+
+                   if (interimTranscript.trim()) {
+                       updateInterimText(interimTranscript);
+                       schedulePauseBreak();
+                   } else {
+                       removeInterimSpan();
+                       clearTimeout(pauseTimer);
+                   }
+               };
+
+
+               rec.onerror = (event) => {
+                   if (event.error === 'no-speech' || event.error === 'aborted') {
+                       return;
+                   }
+
+
+                   if (event.error === 'not-allowed') {
+                       showAlert('マイクの使用が許可されていません。ブラウザのアドレスバー付近にあるマイクのアイコンから「許可」を選んでください。');
+                       stopRecording();
+                   } else if (event.error === 'audio-capture') {
+                       showAlert('マイクが見つかりません。端末のマイク設定を確認してください。');
+                       stopRecording();
+                   } else if (event.error === 'network') {
+                       showAlert('ネットワーク接続が不安定です。インターネット接続を確認してください。');
+                   }
+               };
+
+
+               // ブラウザ仕様でセッションが切れた際の自動再接続
+               rec.onend = () => {
+                   // 途中の仮テキストが残っていれば確定させて取りこぼしを防ぐ
+                   if (!commitInterimEarly()) {
+                       removeInterimSpan();
+                   }
+                   resetSessionState();
+
+
+                   if (isRecording) {
+                       statusText.textContent = '再接続中...';
+                       restartTimer = setTimeout(() => {
+                           if (isRecording) {
+                               try {
+                                   rec.start();
+                               } catch (e) {
+                                   // 既に開始済みの場合の例外を吸収
+                               }
+                           }
+                       }, 80);
+                   } else {
+                       updateStoppedUI();
+                   }
+               };
+
+
+               return rec;
+           }
+
+
+           /**
+            * 登録単語を認識ヒントとして渡す（対応ブラウザのみ・非対応なら何もしない）
+            */
+           function applyPhraseHints(rec) {
+               try {
+                   const words = [...new Set(dictionary.map(([, to]) => to))];
+                   if ('phrases' in rec && window.SpeechRecognitionPhrase) {
+                       rec.phrases = words.map(w => new SpeechRecognitionPhrase(w, 5.0));
+                   }
+               } catch (e) {
+                   // 非対応時は無視
+               }
+           }
+
+
+           /**
+            * 録音開始処理
+            */
+           function startRecording() {
+               if (!recognition) {
+                   recognition = initRecognition();
+               }
+               applyPhraseHints(recognition);
+               resetSessionState();
+               isRecording = true;
+
+
+               // ボタン表示を「停止」状態へ更新
+               toggleBtn.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+               toggleBtn.classList.add('bg-red-600', 'hover:bg-red-700', 'recording-pulse');
+               btnText.textContent = '音声入力を停止';
+               btnIcon.innerHTML = `<rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" stroke="none" />`;
+
+
+               startTimer();
+               requestWakeLock();
+
+
+               try {
+                   recognition.start();
+               } catch (e) {
+                   // すでに実行中の場合は無視
+               }
+           }
+
+
+           /**
+            * 録音停止処理
+            */
+           function stopRecording() {
+               isRecording = false;
+               if (restartTimer) {
+                   clearTimeout(restartTimer);
+                   restartTimer = null;
+               }
+
+
+               stopTimer();
+               releaseWakeLock();
+               updateStoppedUI();
+
+
+               if (recognition) {
+                   try {
+                       recognition.stop();
+                   } catch (e) {
+                       // 既に停止済みの場合は無視
+                   }
+               }
+           }
+
+
+           function updateStoppedUI() {
+               toggleBtn.classList.remove('bg-red-600', 'hover:bg-red-700', 'recording-pulse');
+               toggleBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+               btnText.textContent = '音声入力を開始';
+               btnIcon.innerHTML = `<path stroke-linecap="round" stroke-linejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />`;
+
+
+               statusBadge.classList.remove('bg-red-100', 'text-red-600');
+               statusBadge.classList.add('bg-slate-100', 'text-slate-600');
+               statusDot.classList.remove('bg-red-600', 'dot-recording');
+               statusDot.classList.add('bg-slate-400');
+               statusText.textContent = elapsedSeconds > 0 ? '一時停止中' : '待機中';
+           }
+
+
+           toggleBtn.addEventListener('click', () => {
+               if (isRecording) {
+                   stopRecording();
+               } else {
+                   startRecording();
+               }
+           });
+
+
+           // 手動改行ボタン（話し途中なら、その場で確定して改行）
+           newlineBtn.addEventListener('click', () => {
+               if (!commitInterimEarly()) {
+                   removeInterimSpan();
+                   editor.appendChild(document.createTextNode(getSeparator()));
+                   editor.scrollTop = editor.scrollHeight;
+                   updateCharCount();
+               }
+           });
+
+
+           // 全文コピーボタン（iFrame環境でも確実に動くフォールバック付き）
+           copyBtn.addEventListener('click', () => {
+               // 仮テキストを除いた確定文章を取得
+               const clone = editor.cloneNode(true);
+               const tempInterim = clone.querySelector('.interim-text');
+               if (tempInterim) tempInterim.remove();
+
+
+               const cleanText = (clone.textContent || '').trim();
+               if (!cleanText) {
+                   showToast('コピーする文章がありません');
+                   return;
+               }
+
+
+               const tempArea = document.createElement('textarea');
+               tempArea.value = cleanText;
+               tempArea.style.position = 'fixed';
+               tempArea.style.left = '-9999px';
+               document.body.appendChild(tempArea);
+               tempArea.select();
+               tempArea.setSelectionRange(0, 99999);
+
+
+               try {
+                   document.execCommand('copy');
+                   showToast('クリップボードにコピーしました！');
+               } catch (err) {
+                   showAlert('コピーに失敗しました。文章を選択して手動でコピーしてください。');
+               } finally {
+                   document.body.removeChild(tempArea);
+               }
+           });
+
+
+           // テキスト保存（.txtダウンロード）
+           downloadBtn.addEventListener('click', () => {
+               const clone = editor.cloneNode(true);
+               const tempInterim = clone.querySelector('.interim-text');
+               if (tempInterim) tempInterim.remove();
+
+
+               const cleanText = (clone.textContent || '').trim();
+               if (!cleanText) {
+                   showToast('保存する文章がありません');
+                   return;
+               }
+
+
+               const now = new Date();
+               const timestamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+               const filename = `音声メモ_${timestamp}.txt`;
+
+
+               const blob = new Blob([cleanText], { type: 'text/plain;charset=utf-8' });
+               const url = URL.createObjectURL(blob);
+               const a = document.createElement('a');
+               a.href = url;
+               a.download = filename;
+               document.body.appendChild(a);
+               a.click();
+               document.body.removeChild(a);
+               URL.revokeObjectURL(url);
+
+
+               showToast(`「${filename}」を保存しました`);
+           });
+
+
+           // クリアボタン（カスタムモーダル表示）
+           clearBtn.addEventListener('click', () => {
+               if (!(editor.textContent || '').trim() && elapsedSeconds === 0) {
+                   showToast('すでにリセットされています');
+                   return;
+               }
+               clearModal.classList.remove('hidden');
+               clearModal.classList.add('flex');
+           });
+
+
+           cancelClearBtn.addEventListener('click', () => {
+               clearModal.classList.add('hidden');
+               clearModal.classList.remove('flex');
+           });
+
+
+           confirmClearBtn.addEventListener('click', () => {
+               removeInterimSpan();
+               editor.innerHTML = '';
+               // 早期確定の差し替え対象もリセット（消した文章が復活しないように）
+               commitsFor = {};
+               updateCharCount();
+               resetTimer();
+
+
+               if (isRecording) {
+                   startTimer();
+               } else {
+                   updateStoppedUI();
+               }
+
+
+               clearModal.classList.add('hidden');
+               clearModal.classList.remove('flex');
+               showToast('文章と経過時間をリセットしました');
+           });
+
+
+           clearModal.addEventListener('click', (e) => {
+               if (e.target === clearModal) {
+                   clearModal.classList.add('hidden');
+                   clearModal.classList.remove('flex');
+               }
+           });
+       });
+   </script>
+</body>
+</html>
