@@ -62,7 +62,7 @@
            white-space: pre-wrap;
            word-break: break-word;
            outline: none;
-           line-height: 1.8;
+           line-height: 1.5;
            transition: border-color 0.2s ease, box-shadow 0.2s ease;
        }
 
@@ -158,10 +158,10 @@
        </div>
 
 
-       <!-- コントロールバー（録音ボタン・経過時間・改行/間隔オプション） -->
-       <section class="bg-slate-50 border border-slate-200/90 rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+       <!-- コントロールバー（音声入力ボタン・経過時間） -->
+       <section class="bg-slate-50 border border-slate-200/90 rounded-2xl p-4">
 
-           <!-- 左側：録音開始/停止ボタン & 経過時間カウンター -->
+           <!-- 音声入力の開始/停止ボタン & 経過時間カウンター -->
            <div class="flex flex-wrap items-center gap-3 sm:gap-4">
                <button id="toggleBtn" type="button" class="inline-flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm sm:text-base px-6 py-3.5 rounded-xl shadow-sm transition-all active:scale-95 min-w-[195px]">
                    <svg id="btnIcon" xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.2">
@@ -181,54 +181,6 @@
                        <span id="timerDisplay" class="text-lg sm:text-xl font-bold text-slate-800 tabular-nums leading-none">00:00</span>
                    </div>
                </div>
-           </div>
-
-
-           <!-- 右側：改行・段落・行間設定 -->
-           <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-               <!-- 改行ルール -->
-               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
-                   <span class="text-[11px] font-bold text-slate-400">改行ルール</span>
-                   <select id="breakRule" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
-                       <option value="comma_and_pause" selected>読点「、」と切れ目</option>
-                       <option value="pause_only">言葉の切れ目のみ</option>
-                       <option value="period_and_pause">句点「。」と切れ目</option>
-                   </select>
-               </label>
-
-
-               <!-- 改行までの無音時間（早めの改行） -->
-               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
-                   <span class="text-[11px] font-bold text-slate-400">切れ目と判定する無音</span>
-                   <select id="pauseMs" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
-                       <option value="400">0.4秒（最速）</option>
-                       <option value="600">0.6秒（速い）</option>
-                       <option value="800" selected>0.8秒（おすすめ）</option>
-                       <option value="1200">1.2秒（ゆっくり）</option>
-                       <option value="0">ブラウザ任せ（従来）</option>
-                   </select>
-               </label>
-
-
-               <!-- 区切り間隔 -->
-               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
-                   <span class="text-[11px] font-bold text-slate-400">区切り間隔</span>
-                   <select id="blankLineMode" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
-                       <option value="double" selected>1行空ける（見やすい）</option>
-                       <option value="single">通常の改行（1行）</option>
-                   </select>
-               </label>
-
-
-               <!-- 行間 -->
-               <label class="flex flex-col gap-1 bg-white border border-slate-200 rounded-xl px-3 py-2">
-                   <span class="text-[11px] font-bold text-slate-400">行間</span>
-                   <select id="lineHeightSelect" class="text-xs sm:text-sm font-bold text-slate-700 bg-transparent outline-none cursor-pointer">
-                       <option value="1.5">標準（1.5）</option>
-                       <option value="1.8" selected>ゆったり（1.8）</option>
-                       <option value="2.2">広め（2.2）</option>
-                   </select>
-               </label>
            </div>
        </section>
 
@@ -362,10 +314,6 @@
 
            const editor = document.getElementById('editor');
            const charCountEl = document.getElementById('charCount');
-           const breakRuleSelect = document.getElementById('breakRule');
-           const pauseSelect = document.getElementById('pauseMs');
-           const blankLineSelect = document.getElementById('blankLineMode');
-           const lineHeightSelect = document.getElementById('lineHeightSelect');
            const dictInput = document.getElementById('dictInput');
 
 
@@ -387,6 +335,12 @@
 
            const toast = document.getElementById('toast');
            const toastMessage = document.getElementById('toastMessage');
+
+
+           // 固定設定（利用者による変更は想定しない）
+           const BREAK_RULE = 'comma_and_pause'; // 読点「、」と言葉の切れ目で改行
+           const PAUSE_MS = 800;                 // 切れ目と判定する無音時間（0.8秒）
+           const LINE_SEPARATOR = '\n\n';        // 区切りは1行空ける
 
 
            // 状態管理変数
@@ -424,18 +378,12 @@
 
 
            /**
-            * 設定の保存・復元（localStorage）
+            * 単語登録の保存・復元（localStorage）
             */
            const storage = {
                get(key) { try { return localStorage.getItem(key); } catch (e) { return null; } },
                set(key, val) { try { localStorage.setItem(key, val); } catch (e) {} },
            };
-           [breakRuleSelect, pauseSelect, blankLineSelect, lineHeightSelect].forEach((sel) => {
-               const saved = storage.get('memo_' + sel.id);
-               if (saved !== null && [...sel.options].some(o => o.value === saved)) sel.value = saved;
-               sel.addEventListener('change', () => storage.set('memo_' + sel.id, sel.value));
-           });
-           editor.style.lineHeight = lineHeightSelect.value;
            dictInput.value = storage.get('memo_dict') || '';
 
 
@@ -509,14 +457,6 @@
 
 
            editor.addEventListener('input', updateCharCount);
-
-
-           /**
-            * 行間スタイル変更
-            */
-           lineHeightSelect.addEventListener('change', () => {
-               editor.style.lineHeight = lineHeightSelect.value;
-           });
 
 
            /**
@@ -604,7 +544,7 @@
             * 改行区切り文字列の取得（\n\n または \n）
             */
            function getSeparator() {
-               return blankLineSelect.value === 'double' ? '\n\n' : '\n';
+               return LINE_SEPARATOR;
            }
 
 
@@ -612,7 +552,7 @@
             * 確定テキストに改行ルールを適用して整形
             */
            function formatRecognizedText(text) {
-               const rule = breakRuleSelect.value;
+               const rule = BREAK_RULE;
                const sep = getSeparator();
                let formatted = applyDictionary(text.trim());
                if (!formatted) return '';
@@ -645,7 +585,7 @@
             * 認識中の仮テキスト（薄いグレー）をエディタ末尾にリアルタイム更新
             */
            function updateInterimText(text) {
-               const rule = breakRuleSelect.value;
+               const rule = BREAK_RULE;
                const sep = getSeparator();
                let displayInterim = applyDictionary(text);
 
@@ -749,8 +689,7 @@
 
            function schedulePauseBreak() {
                clearTimeout(pauseTimer);
-               const ms = Number(pauseSelect.value);
-               if (ms > 0) pauseTimer = setTimeout(commitInterimEarly, ms);
+               pauseTimer = setTimeout(commitInterimEarly, PAUSE_MS);
            }
 
 
