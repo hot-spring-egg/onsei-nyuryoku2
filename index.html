@@ -175,6 +175,16 @@
                        <span id="timerDisplay" class="text-lg sm:text-xl font-bold text-slate-800 tabular-nums leading-none">00:00</span>
                    </div>
                </div>
+
+
+               <!-- 音声録音のON/OFF -->
+               <label class="flex items-center gap-2 bg-white border border-slate-200 px-3.5 py-2.5 rounded-xl cursor-pointer select-none">
+                   <input id="recordAudioToggle" type="checkbox" class="h-4 w-4 accent-red-600 cursor-pointer" checked />
+                   <span class="text-xs sm:text-sm font-bold text-slate-700">音声も録音する</span>
+                   <span id="recIndicator" class="hidden items-center gap-1 text-[11px] font-bold text-red-600">
+                       <span class="w-2 h-2 rounded-full bg-red-600 dot-recording"></span>REC
+                   </span>
+               </label>
            </div>
 
 
@@ -241,6 +251,16 @@
                class="w-full p-4 sm:p-5 bg-white border-2 border-slate-200 focus:border-blue-500 rounded-2xl text-base sm:text-lg text-slate-800 shadow-inner"
                data-placeholder="「音声入力を開始」を押して話すと、ここにリアルタイムで文字が打ち込まれます。&#10;&#10;話している途中の言葉は薄いグレーで表示され、言葉が切れると黒文字になって自動で改行されます。"
            ></div>
+       </section>
+
+
+       <!-- 録音した音声の一覧 -->
+       <section id="recordingsSection" class="hidden flex-col gap-2 bg-slate-50 border border-slate-200/90 rounded-2xl p-4">
+           <div class="flex items-center justify-between">
+               <span class="text-xs sm:text-sm font-bold text-slate-600">録音した音声</span>
+               <span class="text-[11px] text-slate-400">※ ページを閉じると消えます。必要なものは保存してください</span>
+           </div>
+           <ul id="recordingsList" class="flex flex-col gap-2"></ul>
        </section>
 
 
@@ -383,6 +403,12 @@
            const toastMessage = document.getElementById('toastMessage');
 
 
+           const recordAudioToggle = document.getElementById('recordAudioToggle');
+           const recIndicator = document.getElementById('recIndicator');
+           const recordingsSection = document.getElementById('recordingsSection');
+           const recordingsList = document.getElementById('recordingsList');
+
+
            // 状態管理変数
            let recognition = null;
            let isRecording = false;
@@ -431,6 +457,10 @@
            });
            editor.style.lineHeight = lineHeightSelect.value;
            dictInput.value = storage.get('memo_dict') || '';
+           if (storage.get('memo_recordAudio') === '0') recordAudioToggle.checked = false;
+           recordAudioToggle.addEventListener('change', () => {
+               storage.set('memo_recordAudio', recordAudioToggle.checked ? '1' : '0');
+           });
 
 
            /**
@@ -758,6 +788,191 @@
 
 
            /**
+            * 音声録音（MediaRecorder）
+            * 音声入力の開始〜停止を1つの録音として保存し、一覧から再生・保存できるようにする
+            */
+           let mediaRecorder = null;
+           let mediaStream = null;
+           let recordingCount = 0;
+           let audioSession = 0;
+
+
+           function pickAudioMimeType() {
+               if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+               const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+               return candidates.find(t => MediaRecorder.isTypeSupported(t)) || '';
+           }
+
+
+           function extensionFor(mimeType) {
+               if (mimeType.includes('mp4')) return 'm4a';
+               if (mimeType.includes('ogg')) return 'ogg';
+               return 'webm';
+           }
+
+
+           function fileTimestamp(d) {
+               const p = (n) => String(n).padStart(2, '0');
+               return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+           }
+
+
+           async function startAudioRecording() {
+               if (!recordAudioToggle.checked) return;
+               if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+                   showAlert('お使いのブラウザは音声の録音に対応していません（文字起こしはそのまま続けられます）。');
+                   return;
+               }
+
+
+               const session = ++audioSession;
+               let stream;
+               try {
+                   stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+               } catch (e) {
+                   showAlert('録音用のマイクを取得できませんでした（文字起こしはそのまま続けられます）。');
+                   return;
+               }
+
+
+               // 取得を待つ間に停止された場合は破棄
+               if (session !== audioSession || !isRecording) {
+                   stream.getTracks().forEach(t => t.stop());
+                   return;
+               }
+
+
+               const mimeType = pickAudioMimeType();
+               let recorder;
+               try {
+                   recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+               } catch (e) {
+                   stream.getTracks().forEach(t => t.stop());
+                   showAlert('録音を開始できませんでした（文字起こしはそのまま続けられます）。');
+                   return;
+               }
+
+
+               const chunks = [];
+               const startedAt = new Date();
+               recorder.ondataavailable = (e) => {
+                   if (e.data && e.data.size > 0) chunks.push(e.data);
+               };
+               recorder.onstop = () => {
+                   stream.getTracks().forEach(t => t.stop());
+                   const type = recorder.mimeType || mimeType || 'audio/webm';
+                   if (chunks.length) {
+                       addRecording(new Blob(chunks, { type }), startedAt, Date.now() - startedAt.getTime());
+                   }
+               };
+
+
+               mediaStream = stream;
+               mediaRecorder = recorder;
+               recorder.start(1000);
+               recIndicator.classList.remove('hidden');
+               recIndicator.classList.add('inline-flex');
+           }
+
+
+           function stopAudioRecording() {
+               audioSession++;
+               recIndicator.classList.add('hidden');
+               recIndicator.classList.remove('inline-flex');
+               if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                   try {
+                       mediaRecorder.stop();
+                   } catch (e) {
+                       if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+                   }
+               }
+               mediaRecorder = null;
+               mediaStream = null;
+           }
+
+
+           function updateRecordingsVisibility() {
+               const has = recordingsList.children.length > 0;
+               recordingsSection.classList.toggle('hidden', !has);
+               recordingsSection.classList.toggle('flex', has);
+           }
+
+
+           function addRecording(blob, startedAt, durationMs) {
+               recordingCount += 1;
+               const url = URL.createObjectURL(blob);
+               const filename = `音声メモ録音_${fileTimestamp(startedAt)}.${extensionFor(blob.type)}`;
+               const label = `録音 ${recordingCount}`;
+               const timeLabel = `${String(startedAt.getHours()).padStart(2, '0')}:${String(startedAt.getMinutes()).padStart(2, '0')} 開始・${formatTime(Math.max(1, Math.round(durationMs / 1000)))}`;
+
+
+               const li = document.createElement('li');
+               li.className = 'flex flex-col sm:flex-row sm:items-center gap-2 bg-white border border-slate-200 rounded-xl px-3 py-2.5';
+
+
+               const info = document.createElement('div');
+               info.className = 'flex flex-col min-w-[120px]';
+               const title = document.createElement('span');
+               title.className = 'text-xs sm:text-sm font-bold text-slate-700';
+               title.textContent = label;
+               const meta = document.createElement('span');
+               meta.className = 'text-[11px] text-slate-400 tabular-nums';
+               meta.textContent = timeLabel;
+               info.append(title, meta);
+
+
+               const audio = document.createElement('audio');
+               audio.controls = true;
+               audio.preload = 'metadata';
+               audio.src = url;
+               audio.className = 'w-full sm:flex-1 h-10';
+
+
+               const actions = document.createElement('div');
+               actions.className = 'flex gap-2';
+               const saveBtn = document.createElement('button');
+               saveBtn.type = 'button';
+               saveBtn.className = 'px-3 py-2 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-lg transition-colors active:scale-95';
+               saveBtn.textContent = '保存';
+               saveBtn.addEventListener('click', () => {
+                   const a = document.createElement('a');
+                   a.href = url;
+                   a.download = filename;
+                   document.body.appendChild(a);
+                   a.click();
+                   document.body.removeChild(a);
+                   showToast(`「${filename}」を保存しました`);
+               });
+               const delBtn = document.createElement('button');
+               delBtn.type = 'button';
+               delBtn.className = 'px-3 py-2 text-xs font-bold text-red-600 bg-white hover:bg-red-50 border border-red-200 rounded-lg transition-colors active:scale-95';
+               delBtn.textContent = '削除';
+               delBtn.addEventListener('click', () => {
+                   audio.pause();
+                   URL.revokeObjectURL(url);
+                   li.remove();
+                   updateRecordingsVisibility();
+                   showToast(`${label}を削除しました`);
+               });
+               actions.append(saveBtn, delBtn);
+
+
+               li.append(info, audio, actions);
+               recordingsList.appendChild(li);
+               updateRecordingsVisibility();
+           }
+
+
+           // 録音が残っている状態でページを閉じようとしたら確認
+           window.addEventListener('beforeunload', (e) => {
+               if (recordingsList.children.length > 0 || mediaRecorder) {
+                   e.preventDefault();
+                   e.returnValue = '';
+               }
+           });
+
+
+           /**
             * 候補の中から最も信頼度の高い文字列を選ぶ
             */
            function bestTranscript(result) {
@@ -930,6 +1145,7 @@
 
                startTimer();
                requestWakeLock();
+               startAudioRecording();
 
 
                try {
@@ -953,6 +1169,7 @@
 
                stopTimer();
                releaseWakeLock();
+               stopAudioRecording();
                updateStoppedUI();
 
 
